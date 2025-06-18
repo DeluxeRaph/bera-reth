@@ -70,7 +70,7 @@ where
     ///   - Validates transactions according to chain rules
     ///   - Provides transactions for block building
     ///
-    /// - **BasicPayloadServiceBuilder<EthereumPayloadBuilder>**: Block building and payload
+    /// - **`BasicPayloadServiceBuilder<EthereumPayloadBuilder>`**: Block building and payload
     ///   creation
     ///   - Triggered by Engine API `forkchoice_updated` calls from consensus layer
     ///   - Assembles transactions from pool into block payloads
