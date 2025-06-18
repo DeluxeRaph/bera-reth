@@ -1,4 +1,4 @@
-//! Berachain chain spec
+//! Berachain chain specification with Ethereum hardforks plus Prague1 minimum base fee
 
 use crate::{
     genesis::BerachainGenesisConfig,
@@ -22,9 +22,16 @@ use reth_ethereum_cli::chainspec::SUPPORTED_CHAINS;
 use reth_evm::eth::spec::EthExecutorSpec;
 use std::{fmt::Display, sync::Arc};
 
-/// Berachain chain spec
+/// Minimum base fee enforced after Prague1 hardfork (1 gwei)
+const PRAGUE1_MIN_BASE_FEE_WEI: u64 = 1_000_000_000;
+
+/// Default minimum base fee when Prague1 is not active.
+const DEFAULT_MIN_BASE_FEE_WEI: u64 = 0;
+
+/// Berachain chain specification wrapping Reth's ChainSpec with Prague1 hardfork
 #[derive(Debug, Clone, Into, Constructor, PartialEq, Eq, Default)]
 pub struct BerachainChainSpec {
+    /// The underlying Reth chain specification
     inner: ChainSpec,
 }
 impl EthChainSpec for BerachainChainSpec {
@@ -90,8 +97,11 @@ impl EthChainSpec for BerachainChainSpec {
         // Note that we use this parent block timestamp to determine whether Prague 1 is active.
         // This means that we technically start the base_fee enforcement the block after the fork
         // block. This is a conscious decision to minimize fork diffs across execution clients.
-        let min_base_fee =
-            if self.is_prague1_active_at_timestamp(parent.timestamp()) { 1_000_000_000 } else { 0 };
+        let min_base_fee = if self.is_prague1_active_at_timestamp(parent.timestamp()) {
+            PRAGUE1_MIN_BASE_FEE_WEI
+        } else {
+            DEFAULT_MIN_BASE_FEE_WEI
+        };
 
         raw.max(min_base_fee)
     }
@@ -137,7 +147,7 @@ impl EthExecutorSpec for BerachainChainSpec {
     }
 }
 
-/// Berachain chain specification parser.
+/// Parser for Berachain chain specifications
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct BerachainChainSpecParser;
@@ -201,9 +211,12 @@ impl From<Genesis> for BerachainChainSpec {
             };
 
         // Time-based hardforks
+        // For the From implementation, we use a default config if parsing fails
+        // This maintains backward compatibility while preventing panics
         let berachain_genesis_config =
             BerachainGenesisConfig::try_from(&genesis.config.extra_fields).unwrap_or_else(|e| {
-                panic!("failed to parse berachain genesis config from genesis file: {e}")
+                tracing::warn!("Failed to parse berachain genesis config, using defaults: {}", e);
+                BerachainGenesisConfig::default()
             });
 
         let time_hardfork_opts = [

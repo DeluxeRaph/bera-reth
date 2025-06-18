@@ -1,4 +1,5 @@
-#![allow(missing_docs)]
+//! Bera-Reth main entry point
+
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
@@ -11,10 +12,13 @@ use reth::{args::RessArgs, ress::install_ress_subprotocol};
 use reth_node_builder::NodeHandle;
 use tracing::info;
 
+/// Main entry point. Sets up runtime, signal handlers, and launches Berachain node.
 fn main() {
+    // Install signal handler for better crash reporting
     reth_cli_util::sigsegv_handler::install();
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
+    // This helps with debugging issues during development and operation.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
