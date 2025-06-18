@@ -138,3 +138,17 @@ where
         rpc_block.into_consensus().convert_transactions()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_node_types() {
+        let node = BerachainNode::default();
+
+        // Test that BerachainNode can be instantiated and has Debug
+        let debug_str = format!("{node:?}");
+        assert!(debug_str.contains("BerachainNode"));
+    }
+}

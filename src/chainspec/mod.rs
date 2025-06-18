@@ -281,3 +281,40 @@ impl From<Genesis> for BerachainChainSpec {
         Self { inner }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_genesis::Genesis;
+
+    #[test]
+    fn test_chain_spec_default() {
+        let chain_spec = BerachainChainSpec::default();
+
+        // Test that default creates a valid chain spec
+        assert_eq!(chain_spec.prune_delete_limit(), 20000);
+        assert!(chain_spec.deposit_contract().is_none());
+    }
+
+    #[test]
+    fn test_base_fee_params() {
+        let chain_spec = BerachainChainSpec::default();
+
+        // Test base fee params
+        let params = chain_spec.base_fee_params_at_timestamp(0);
+        assert_eq!(params.max_change_denominator, 8);
+        assert_eq!(params.elasticity_multiplier, 2);
+    }
+
+    #[test]
+    fn test_from_genesis() {
+        let genesis = Genesis::default();
+        let chain_spec = BerachainChainSpec::from(genesis);
+
+        // Should create a valid chain spec
+        assert_eq!(
+            *chain_spec.chain().kind(),
+            reth_chainspec::ChainKind::Named(reth_chainspec::NamedChain::Mainnet)
+        );
+    }
+}
