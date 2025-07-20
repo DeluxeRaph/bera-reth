@@ -181,7 +181,7 @@ impl From<Genesis> for BerachainChainSpec {
     fn from(genesis: Genesis) -> Self {
         let berachain_genesis_config =
             BerachainGenesisConfig::try_from(&genesis.config.extra_fields).unwrap_or_else(|e| {
-                tracing::warn!("Failed to parse berachain genesis config, using defaults: {}", e);
+                tracing::warn!("Failed to parse berachain genesis config, using defaults: {e}. Please ensure the genesis file contains a valid 'berachain' configuration section with Prague1 settings including polDistributorAddress.");
                 BerachainGenesisConfig::default()
             });
 
@@ -235,7 +235,9 @@ impl From<Genesis> for BerachainChainSpec {
         // Validate Prague1 comes after Prague if both are configured
         match (genesis.config.prague_time, berachain_genesis_config.prague1.time) {
             (Some(prague_time), prague1_time) if prague1_time < prague_time => {
-                panic!("Prague1 hardfork must activate at or after Prague hardfork");
+                panic!(
+                    "Prague1 hardfork must activate at or after Prague hardfork. Prague time: {prague_time}, Prague1 time: {prague1_time}. Check that Prague1 time is not malformed (should be a valid Unix timestamp).",
+                );
             }
             _ => {}
         }
