@@ -10,6 +10,7 @@ use crate::{
     primitives::{BerachainBlock, BerachainHeader, BerachainPrimitives},
     transaction::BerachainTxEnvelope,
 };
+use reth::chainspec::EthereumHardforks;
 use reth_engine_primitives::{EngineValidator, PayloadValidator};
 use reth_ethereum_payload_builder::EthereumExecutionPayloadValidator;
 use reth_node_api::{AddOnsContext, FullNodeComponents, NodeTypes, PayloadTypes};
@@ -18,18 +19,22 @@ use reth_payload_primitives::{
     EngineApiMessageVersion, EngineObjectValidationError, NewPayloadError, PayloadOrAttributes,
     validate_execution_requests, validate_version_specific_fields,
 };
+// Hardfork validation functions removed - implemented directly for Berachain compatibility
+use reth_payload_validator::{cancun, prague, shanghai};
 use reth_primitives_traits::{Block, RecoveredBlock, SealedBlock};
 use std::{marker::PhantomData, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub struct BerachainEngineValidator {
     inner: EthereumExecutionPayloadValidator<BerachainChainSpec>,
+    /// The inner chainspec is private, so we need this.
+    chain_spec: Arc<BerachainChainSpec>,
 }
 
 impl BerachainEngineValidator {
     /// Instantiates a new validator.
-    pub const fn new(chain_spec: Arc<BerachainChainSpec>) -> Self {
-        Self { inner: EthereumExecutionPayloadValidator::new(chain_spec) }
+    pub fn new(chain_spec: Arc<BerachainChainSpec>) -> Self {
+        Self { inner: EthereumExecutionPayloadValidator::new(chain_spec.clone()), chain_spec }
     }
 
     /// Returns the chain spec used by the validator.
@@ -55,6 +60,8 @@ impl BerachainEngineValidator {
         berachain_header.prev_proposer_pubkey = sidecar.parent_proposer_pub_key;
 
         // Create BerachainBlock with converted header and body
+        // Ommers are empty on Berachain anyway as we don't have uncle blocks due to different
+        // consensus mechanism.
         let berachain_ommers: Vec<BerachainHeader> =
             standard_block.body.ommers.iter().map(|h| BerachainHeader::from(h.clone())).collect();
         let berachain_body: alloy_consensus::BlockBody<BerachainTxEnvelope, BerachainHeader> =
@@ -72,17 +79,31 @@ impl BerachainEngineValidator {
     /// Validate hardfork-specific fields
     fn validate_hardfork_fields(
         &self,
-        _sealed_block: &SealedBlock<BerachainBlock>,
-        _sidecar: &BerachainExecutionPayloadSidecar,
+        sealed_block: &SealedBlock<BerachainBlock>,
+        sidecar: &BerachainExecutionPayloadSidecar,
     ) -> Result<(), NewPayloadError> {
-        // For simplicity, we'll skip the standard hardfork validations here
-        // since they expect standard headers. The inner validator already
-        // validated the standard block, so we just need to do Berachain-specific
-        // validation in validate_berachain_specific_fields
+        shanghai::ensure_well_formed_fields(
+            sealed_block.body(),
+            self.chain_spec.is_shanghai_active_at_timestamp(sealed_block.timestamp),
+        )?;
 
-        // TODO: Implement proper hardfork validation for BerachainBlock
-        // This would involve creating Berachain-specific versions of the
-        // validation functions that work with BerachainHeader
+        cancun::ensure_well_formed_fields(
+            sealed_block,
+            sidecar.inner.cancun(),
+            self.chain_spec.is_cancun_active_at_timestamp(sealed_block.timestamp),
+        )?;
+
+        prague::ensure_well_formed_fields(
+            sealed_block.body(),
+            sidecar.inner.prague(),
+            self.chain_spec.is_prague_active_at_timestamp(sealed_block.timestamp),
+        )?;
+
+        prague1::ensure_well_formed_fields(
+            sealed_block,
+            sidecar.parent_proposer_pub_key,
+            self.chain_spec.is_prague1_active_at_timestamp(sealed_block.timestamp),
+        )?;
 
         Ok(())
     }
@@ -244,29 +265,135 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_chainspec::EthChainSpec;
+    use jsonrpsee_core::__reexports::serde_json;
 
     fn create_test_chain_spec() -> Arc<BerachainChainSpec> {
         let mut genesis = alloy_genesis::Genesis::default();
         genesis.config.cancun_time = Some(0);
         genesis.config.terminal_total_difficulty = Some(alloy_primitives::U256::ZERO);
+        let extra_fields_json = serde_json::json!({
+            "berachain": {
+                "prague1": {
+                    "time": 0,
+                    "baseFeeChangeDenominator": 48,
+                    "minimumBaseFeeWei": 1000000000,
+                    "polDistributorAddress": "0x4200000000000000000000000000000000000042"
+                }
+            }
+        });
+        genesis.config.extra_fields =
+            reth::rpc::types::serde_helpers::OtherFields::try_from(extra_fields_json).unwrap();
         Arc::new(BerachainChainSpec::from(genesis))
     }
 
     #[test]
-    fn test_berachain_engine_validator_new() {
-        let chain_spec = create_test_chain_spec();
-        let validator = BerachainEngineValidator::new(chain_spec.clone());
+    fn test_is_pol_transaction() {
+        use crate::transaction::{BerachainTxEnvelope, PoLTx};
+        use alloy_primitives::{Address, Sealed};
 
-        assert_eq!(validator.chain_spec().chain().id(), chain_spec.chain().id());
-    }
-
-    #[test]
-    fn test_chain_spec_access() {
         let chain_spec = create_test_chain_spec();
-        let expected_chain_id = chain_spec.chain().id();
         let validator = BerachainEngineValidator::new(chain_spec);
 
-        assert_eq!(validator.chain_spec().chain().id(), expected_chain_id);
+        // Test PoL transaction detection
+        let pol_tx_inner = PoLTx {
+            chain_id: 1,
+            from: Address::ZERO,
+            to: Address::ZERO,
+            nonce: 0,
+            gas_limit: 21000,
+            gas_price: 1000000000,
+            input: Default::default(),
+        };
+        let pol_tx =
+            BerachainTxEnvelope::Berachain(Sealed::new_unchecked(pol_tx_inner, Default::default()));
+
+        assert!(validator.is_pol_transaction(&pol_tx));
+
+        // For simplicity, skip testing non-PoL transaction due to complex type requirements
+        // The method logic is simple: matches!(tx, BerachainTxEnvelope::Berachain(_))
+    }
+}
+
+/// Prague1 hardfork validation for Berachain
+pub mod prague1 {
+    use super::*;
+    use crate::primitives::header::BlsPublicKey;
+
+    /// Validates Prague1 hardfork-specific fields for Berachain blocks
+    ///
+    /// When Prague1 is active: parent_proposer_pub_key must be present and match header
+    /// When Prague1 is inactive: parent_proposer_pub_key must be absent
+    pub fn ensure_well_formed_fields(
+        sealed_block: &SealedBlock<BerachainBlock>,
+        parent_proposer_pub_key: Option<BlsPublicKey>,
+        is_prague1_active: bool,
+    ) -> Result<(), NewPayloadError> {
+        if is_prague1_active {
+            validate_prague1_active(sealed_block, parent_proposer_pub_key)
+        } else {
+            validate_prague1_inactive(sealed_block, parent_proposer_pub_key)
+        }
+    }
+
+    fn validate_prague1_active(
+        sealed_block: &SealedBlock<BerachainBlock>,
+        parent_proposer_pub_key: Option<BlsPublicKey>,
+    ) -> Result<(), NewPayloadError> {
+        let parent_pubkey = parent_proposer_pub_key.ok_or_else(|| {
+            NewPayloadError::Other("Prague1 active but parent proposer pubkey missing".into())
+        })?;
+
+        let header_pubkey = sealed_block.header().prev_proposer_pubkey;
+        if header_pubkey != Some(parent_pubkey) {
+            return Err(NewPayloadError::Other(
+                "Prague1 active but parent proposer pubkey mismatch".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn validate_prague1_inactive(
+        sealed_block: &SealedBlock<BerachainBlock>,
+        parent_proposer_pub_key: Option<BlsPublicKey>,
+    ) -> Result<(), NewPayloadError> {
+        if parent_proposer_pub_key.is_some() {
+            return Err(NewPayloadError::Other(
+                "Prague1 not active but parent proposer pubkey present".into(),
+            ));
+        }
+
+        if sealed_block.header().prev_proposer_pubkey.is_some() {
+            return Err(NewPayloadError::Other(
+                "Prague1 not active but header contains proposer pubkey".into(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod validator_tests {
+    use super::*;
+
+    #[test]
+    fn test_prague1_validation_rules() {
+        use crate::primitives::header::BlsPublicKey;
+
+        // Prague1 active: missing parent pubkey should fail
+        assert!(prague1::ensure_well_formed_fields(&SealedBlock::default(), None, true).is_err());
+
+        // Prague1 inactive: must not have pubkey
+        assert!(prague1::ensure_well_formed_fields(&SealedBlock::default(), None, false).is_ok());
+
+        assert!(
+            prague1::ensure_well_formed_fields(
+                &SealedBlock::default(),
+                Some(BlsPublicKey::ZERO),
+                false
+            )
+            .is_err()
+        );
     }
 }
